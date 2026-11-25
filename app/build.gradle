@@ -5,14 +5,14 @@ plugins {
 
 android {
     namespace 'com.simple.lectorpdf'
-    compileSdk 35
+    compileSdk 36
 
     defaultConfig {
         applicationId 'com.simple.lectorpdf'
         minSdk 24
         targetSdk 35
-        versionCode 1
-        versionName '1.0'
+        versionCode 3
+        versionName '1.2'
     }
 
     buildTypes {
@@ -27,4 +27,12 @@ android {
     kotlinOptions {
         jvmTarget = '17'
     }
+}
+
+dependencies {
+    implementation 'androidx.appcompat:appcompat:1.7.1'
+    implementation 'androidx.fragment:fragment-ktx:1.8.9'
+    implementation 'com.google.android.material:material:1.13.0'
+    // Visor oficial: zoom, selección/copia de texto, búsqueda
+    implementation 'androidx.pdf:pdf-viewer-fragment:1.0.0-beta01'
 }

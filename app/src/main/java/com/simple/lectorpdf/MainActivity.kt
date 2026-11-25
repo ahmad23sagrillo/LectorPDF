@@ -1,6 +1,5 @@
 package com.simple.lectorpdf
 
-import android.app.Activity
 import android.content.ClipData
 import android.content.Intent
 import android.content.res.Configuration
@@ -9,10 +8,12 @@ import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.graphics.pdf.PdfRenderer
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
+import android.os.ext.SdkExtensions
 import android.provider.OpenableColumns
 import android.util.LruCache
 import android.view.Gravity
@@ -27,27 +28,28 @@ import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.ListView
 import android.widget.Toast
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AppCompatActivity
+import androidx.pdf.viewer.fragment.PdfViewerFragment
 import java.io.File
 import java.util.concurrent.Executors
 
-class MainActivity : Activity() {
+class MainActivity : AppCompatActivity() {
 
     private lateinit var list: ListView
     private lateinit var openButton: Button
+    private lateinit var pdfContainer: FrameLayout
 
-    // El PdfRenderer solo se usa desde este hilo (no es thread-safe)
-    private val executor = Executors.newSingleThreadExecutor()
-    private val main = Handler(Looper.getMainLooper())
-
-    private var renderer: PdfRenderer? = null
-    private var pfd: ParcelFileDescriptor? = null
-    private var pageCount = 0
     private var currentUri: Uri? = null
 
-    @Volatile private var generation = 0          // invalida renders pendientes
-    private val pending = HashSet<Int>()
-    private val cache = object : LruCache<Int, Bitmap>((Runtime.getRuntime().maxMemory() / 1024 / 6).toInt()) {
-        override fun sizeOf(key: Int, value: Bitmap) = value.byteCount / 1024
+    private val pickPdf = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { openPdf(it) }
+    }
+
+    /** El visor de Jetpack (zoom + copiar texto) requiere SDK Extension S >= 13 (Android 12+ actualizado). */
+    private val modernViewer: Boolean by lazy {
+        Build.VERSION.SDK_INT >= Build.VERSION_CODES.R &&
+            SdkExtensions.getExtensionVersion(Build.VERSION_CODES.S) >= 13
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -59,106 +61,63 @@ class MainActivity : Activity() {
             dividerHeight = (8 * resources.displayMetrics.density).toInt()
             visibility = View.GONE
         }
+        pdfContainer = FrameLayout(this).apply {
+            id = R.id.pdf_container
+            visibility = View.GONE
+        }
         openButton = Button(this).apply {
             text = getString(R.string.abrir)
-            setOnClickListener { pickPdf() }
+            setOnClickListener { launchPicker() }
         }
         val root = FrameLayout(this).apply {
             addView(list, FrameLayout.LayoutParams(-1, -1))
+            addView(pdfContainer, FrameLayout.LayoutParams(-1, -1))
             addView(openButton, FrameLayout.LayoutParams(-2, -2, Gravity.CENTER))
-            // Evita que la barra de navegación tape la última página (Android 15 edge-to-edge)
-            setOnApplyWindowInsetsListener { v, insets ->
-                @Suppress("DEPRECATION")
-                v.setPadding(0, 0, 0, insets.systemWindowInsetBottom)
-                insets
-            }
         }
         setContentView(root)
 
         intent?.data?.let { openPdf(it) }
     }
 
-    // ---------- Abrir ----------
-
-    private fun pickPdf() {
-        val i = Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
-            addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/pdf"
-        }
-        @Suppress("DEPRECATION")
-        startActivityForResult(i, REQ_OPEN)
-    }
-
-    @Deprecated("Deprecated in Java")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == REQ_OPEN && resultCode == RESULT_OK) data?.data?.let { openPdf(it) }
-    }
+    private fun launchPicker() = pickPdf.launch(arrayOf("application/pdf"))
 
     private fun openPdf(uri: Uri) {
-        closePdf()
-        try {
-            val r = try {
-                rendererFrom(contentResolver.openFileDescriptor(uri, "r")!!)
-            } catch (e: Exception) {
-                // Algunos proveedores no entregan un archivo "seekable": copiar a caché
-                rendererFrom(copyToCache(uri))
+        if (modernViewer) {
+            try {
+                showWithJetpack(uri)
+                return
+            } catch (_: Throwable) {
+                // si falla, usar el visor simple
             }
-            renderer = r
-            pageCount = r.pageCount
-            currentUri = uri
-            title = fileName(uri)
-            openButton.visibility = View.GONE
-            list.visibility = View.VISIBLE
-            list.adapter = PageAdapter()
-            invalidateOptionsMenu()
-        } catch (e: Exception) {
-            closePdf()
-            openButton.visibility = View.VISIBLE
-            list.visibility = View.GONE
-            Toast.makeText(this, R.string.error_abrir, Toast.LENGTH_LONG).show()
         }
+        showWithRenderer(uri)
     }
 
-    private fun rendererFrom(fd: ParcelFileDescriptor): PdfRenderer =
-        try {
-            PdfRenderer(fd).also { pfd = fd }
-        } catch (e: Exception) {
-            fd.close(); throw e
-        }
-
-    private fun copyToCache(uri: Uri): ParcelFileDescriptor {
-        val f = File(cacheDir, "temp.pdf")
-        contentResolver.openInputStream(uri)!!.use { input ->
-            f.outputStream().use { input.copyTo(it) }
-        }
-        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+    private fun onOpened(uri: Uri) {
+        currentUri = uri
+        title = fileName(uri)
+        openButton.visibility = View.GONE
+        invalidateOptionsMenu()
     }
 
-    private fun fileName(uri: Uri): String {
-        try {
-            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
-                if (c.moveToFirst()) c.getString(0)?.let { return it }
-            }
-        } catch (_: Exception) { }
-        return uri.lastPathSegment ?: getString(R.string.app_name)
-    }
+    // ---------- Visor Jetpack (zoom, selección de texto, búsqueda) ----------
 
-    private fun invalidateRenders() {
-        generation++
-        pending.clear()
-        cache.evictAll()
-    }
+    private fun pdfFragment(): PdfViewerFragment? =
+        supportFragmentManager.findFragmentByTag(TAG_PDF) as? PdfViewerFragment
 
-    private fun closePdf() {
-        invalidateRenders()
-        val r = renderer
-        val f = pfd
-        renderer = null; pfd = null; pageCount = 0; currentUri = null
-        executor.execute {
-            try { r?.close() } catch (_: Exception) { }
-            try { f?.close() } catch (_: Exception) { }
+    private fun showWithJetpack(uri: Uri) {
+        closeRenderer()
+        list.visibility = View.GONE
+        var f = pdfFragment()
+        if (f == null) {
+            f = PdfViewerFragment()
+            supportFragmentManager.beginTransaction()
+                .replace(R.id.pdf_container, f, TAG_PDF)
+                .commitNow()
         }
+        f.documentUri = uri
+        pdfContainer.visibility = View.VISIBLE
+        onOpened(uri)
     }
 
     // ---------- Compartir ----------
@@ -181,26 +140,107 @@ class MainActivity : Activity() {
     // ---------- Menú ----------
 
     override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(0, MENU_SHARE, 0, R.string.compartir)
+        menu.add(0, MENU_SEARCH, 0, R.string.buscar)
+            .setIcon(android.R.drawable.ic_menu_search)
+            .setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM)
+        menu.add(0, MENU_SHARE, 1, R.string.compartir)
             .setIcon(android.R.drawable.ic_menu_share)
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS)
-        menu.add(0, MENU_OPEN, 1, R.string.abrir)
+        menu.add(0, MENU_OPEN, 2, R.string.abrir)
             .setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER)
         return true
     }
 
     override fun onPrepareOptionsMenu(menu: Menu): Boolean {
         menu.findItem(MENU_SHARE)?.isVisible = currentUri != null
+        menu.findItem(MENU_SEARCH)?.isVisible = currentUri != null && pdfFragment() != null
         return super.onPrepareOptionsMenu(menu)
     }
 
     override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
         MENU_SHARE -> { share(); true }
-        MENU_OPEN -> { pickPdf(); true }
+        MENU_OPEN -> { launchPicker(); true }
+        MENU_SEARCH -> { pdfFragment()?.isTextSearchActive = true; true }
         else -> super.onOptionsItemSelected(item)
     }
 
-    // ---------- Render de páginas ----------
+    private fun fileName(uri: Uri): String {
+        try {
+            contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                if (c.moveToFirst()) c.getString(0)?.let { return it }
+            }
+        } catch (_: Exception) { }
+        return uri.lastPathSegment ?: getString(R.string.app_name)
+    }
+
+    // =====================================================================
+    // Visor simple de respaldo (PdfRenderer) para equipos sin soporte Jetpack
+    // =====================================================================
+
+    private val executor = Executors.newSingleThreadExecutor()
+    private val main = Handler(Looper.getMainLooper())
+    private var renderer: PdfRenderer? = null
+    private var pfd: ParcelFileDescriptor? = null
+    private var pageCount = 0
+    @Volatile private var generation = 0
+    private val pending = HashSet<Int>()
+    private val cache = object : LruCache<Int, Bitmap>((Runtime.getRuntime().maxMemory() / 1024 / 6).toInt()) {
+        override fun sizeOf(key: Int, value: Bitmap) = value.byteCount / 1024
+    }
+
+    private fun showWithRenderer(uri: Uri) {
+        closeRenderer()
+        try {
+            val r = try {
+                rendererFrom(contentResolver.openFileDescriptor(uri, "r")!!)
+            } catch (e: Exception) {
+                rendererFrom(copyToCache(uri))
+            }
+            renderer = r
+            pageCount = r.pageCount
+            pdfContainer.visibility = View.GONE
+            list.visibility = View.VISIBLE
+            list.adapter = PageAdapter()
+            onOpened(uri)
+        } catch (e: Exception) {
+            closeRenderer()
+            list.visibility = View.GONE
+            if (currentUri == null) openButton.visibility = View.VISIBLE
+            Toast.makeText(this, R.string.error_abrir, Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun rendererFrom(fd: ParcelFileDescriptor): PdfRenderer =
+        try {
+            PdfRenderer(fd).also { pfd = fd }
+        } catch (e: Exception) {
+            fd.close(); throw e
+        }
+
+    private fun copyToCache(uri: Uri): ParcelFileDescriptor {
+        val f = File(cacheDir, "temp.pdf")
+        contentResolver.openInputStream(uri)!!.use { input ->
+            f.outputStream().use { input.copyTo(it) }
+        }
+        return ParcelFileDescriptor.open(f, ParcelFileDescriptor.MODE_READ_ONLY)
+    }
+
+    private fun invalidateRenders() {
+        generation++
+        pending.clear()
+        cache.evictAll()
+    }
+
+    private fun closeRenderer() {
+        invalidateRenders()
+        val r = renderer
+        val f = pfd
+        renderer = null; pfd = null; pageCount = 0
+        if (r != null || f != null) executor.execute {
+            try { r?.close() } catch (_: Exception) { }
+            try { f?.close() } catch (_: Exception) { }
+        }
+    }
 
     private fun requestPage(index: Int, width: Int, view: ImageView) {
         val r = renderer ?: return
@@ -254,14 +294,13 @@ class MainActivity : Activity() {
                 iv.setImageBitmap(cached)
             } else {
                 iv.setImageBitmap(null)
-                iv.minimumHeight = (w * 1.414f).toInt()   // placeholder tamaño A4
+                iv.minimumHeight = (w * 1.414f).toInt()
                 requestPage(position, w, iv)
             }
             return iv
         }
     }
 
-    // Rotación: re-renderizar al nuevo ancho
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         if (renderer != null) {
@@ -271,14 +310,15 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
-        closePdf()
+        closeRenderer()
         executor.shutdown()
         super.onDestroy()
     }
 
     companion object {
-        private const val REQ_OPEN = 1
+        private const val TAG_PDF = "pdf"
         private const val MENU_SHARE = 1
         private const val MENU_OPEN = 2
+        private const val MENU_SEARCH = 3
     }
 }

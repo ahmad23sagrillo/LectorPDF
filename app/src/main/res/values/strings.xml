@@ -2,5 +2,6 @@
     <string name="app_name">Lector PDF</string>
     <string name="abrir">Abrir PDF</string>
     <string name="compartir">Compartir</string>
+    <string name="buscar">Buscar</string>
     <string name="error_abrir">No se pudo abrir el PDF</string>
 </resources>
