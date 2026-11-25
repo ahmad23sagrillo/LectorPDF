@@ -6,6 +6,7 @@ plugins {
 android {
     namespace 'com.simple.lectorpdf'
     compileSdk 36
+    compileSdkExtension 19
 
     defaultConfig {
         applicationId 'com.simple.lectorpdf'
