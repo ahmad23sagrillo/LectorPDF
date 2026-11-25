@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId 'com.simple.lectorpdf'
-        minSdk 24
+        minSdk 28
         targetSdk 35
         versionCode 3
         versionName '1.2'
