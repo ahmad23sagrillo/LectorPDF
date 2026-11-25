@@ -30,6 +30,7 @@ import android.widget.ListView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import com.google.android.material.dialog.MaterialAlertDialogBuilder
 import androidx.pdf.viewer.fragment.PdfViewerFragment
 import java.io.File
 import java.util.concurrent.Executors
@@ -77,6 +78,19 @@ class MainActivity : AppCompatActivity() {
         setContentView(root)
 
         intent?.data?.let { openPdf(it) }
+
+        if (savedInstanceState == null) showSplashMessage()
+    }
+
+    /** Ventana rápida al iniciar: se cierra sola a los 2 s o al tocar fuera. */
+    private fun showSplashMessage() {
+        val dialog = MaterialAlertDialogBuilder(this)
+            .setMessage("Apple Boys paguen sus APPS")
+            .setCancelable(true)
+            .create()
+        dialog.setCanceledOnTouchOutside(true)
+        dialog.show()
+        main.postDelayed({ if (dialog.isShowing && !isFinishing) dialog.dismiss() }, 2000)
     }
 
     private fun launchPicker() = pickPdf.launch(arrayOf("application/pdf"))
