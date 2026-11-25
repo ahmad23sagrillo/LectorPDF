@@ -41,3 +41,11 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: LectorPDF build ${{ github.run_number }}
           files: LectorPDF.apk
+
+      - name: Borrar builds anteriores (dejar solo la última)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release list --repo "${{ github.repository }}" --limit 100 --json tagName --jq '.[].tagName' \
+            | grep -v "^build-${{ github.run_number }}$" \
+            | while read -r t; do gh release delete "$t" --repo "${{ github.repository }}" --cleanup-tag --yes; done
